@@ -15,7 +15,24 @@ def levy_characteristic_function(u, alpha, beta, gamma, delta):
         return np.exp(1j * delta * u + term)
 
 
-
+def enforce_martingale_condition(alpha, beta, gamma, T, r):
+    """
+    Enforces the martingale condition, even if assuming that prices are not independent, mostly for Arbitrage Prevention reasons.
+    """
+    # For the martingale condition, we need phi(-i) = exp(r*T)
+    def condition(delta):
+        char_value = levy_characteristic_function(-1j, alpha, beta, gamma, delta)
+        return np.real(char_value) - np.exp(r * T)
+    
+    # Solve for delta
+    delta_guess = r * T  # Reasonable initial guess
+    delta_solution = fsolve(condition, delta_guess, full_output=True)
+    
+    if delta_solution[2] != 1:  # Check if solution converged
+        print(f"Warning: Martingale condition solver did not converge. Using fallback.")
+        return r * T - 0.5 * gamma**2 * T  # Fallback to normal approximation
+    
+    return delta_solution[0][0]
 
 def levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=10000):
     """
