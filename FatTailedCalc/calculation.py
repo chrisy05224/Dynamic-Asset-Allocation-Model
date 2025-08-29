@@ -2,6 +2,7 @@ import numpy as np
 from scipy.optimize import fsolve
 import yfinance as yf
 from scipy.stats import scoreatpercentile
+from scipy.stats import norm
 
 def levy_characteristic_function(u, alpha, beta, gamma, delta):
     """
@@ -175,9 +176,62 @@ def quantile_estimation(returns):
         'delta': delta_est
     }
 
+## Debug cases
+def test_with_normal_case():
+    """Test that Lévy with alpha=2 gives reasonable results (should approximate normal)."""
+    print("Testing with alpha=2 (should approximate normal distribution):")
+    
+    S0, K, T, r, q = 100.0, 105.0, 1.0, 0.05, 0.02
+    alpha, beta, gamma = 2.0, 0.0, 0.2  # Normal distribution case
+    
+    expectation = levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma)
+    
+    # Compare with analytical normal probability
+    d2 = (np.log(S0/K) + (r - q - 0.5*gamma**2)*T) / (gamma * np.sqrt(T))
+    normal_prob = norm.cdf(d2)
+    
+    print(f"Lévy Expectation (α=2): {expectation:.6f}")
+    print(f"Normal Distribution: {normal_prob:.6f}")
+    print(f"Difference: {abs(expectation - normal_prob):.6f}")
+    print()
+
+def test_with_fat_tails():
+    """Test with fat-tailed distribution."""
+    print("Testing with fat-tailed distribution (α=1.7):")
+    
+    S0, K, T, r, q = 100.0, 105.0, 1.0, 0.05, 0.02
+    alpha, beta, gamma = 1.7, -0.3, 0.2  # Fat-tailed case
+    
+    expectation = levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma)
+    
+    print(f"Lévy Expectation (α=1.7): {expectation:.6f}")
+    print(f"Interpretation: {expectation:.2%} probability of OTM call becoming ITM")
+    print()
+
+def sensitivity_analysis():
+    """Analyze how expectation changes with different parameters."""
+    print("Sensitivity Analysis:")
+    print("K\tα\tβ\tE[1_{S_T > K}]")
+    print("-" * 40)
+    
+    S0, T, r, q = 100.0, 1.0, 0.05, 0.02
+    gamma = 0.2
+    
+    # Test different strikes
+    for K in [90, 100, 105, 110, 115]:
+        for alpha, beta in [(2.0, 0.0), (1.7, -0.3), (1.5, -0.4)]:
+            expectation = levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=1000)
+            print(f"{K}\t{alpha}\t{beta}\t{expectation:.6f}")
 
 
-        # Where
+ 
+
+
+
+
+
+'''
+# Where
 # S0: Current spot price of the underlying asset
 # K: Strike price of the option contract
 # T: Time to expiration (in years)
@@ -257,4 +311,5 @@ if __name__ == "__main__":
         moneyness = "ITM" if strike < S0 else "ATM" if strike == S0 else "OTM"
         expectation_val = levy_otm_to_itm_expectation(S0, strike, T, r, q, alpha, beta, gamma, n_points=5000)
         print(f"{strike}\t{moneyness}\t\t{expectation_val:.6f}")
+''' 
 
