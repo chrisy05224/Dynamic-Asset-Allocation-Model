@@ -17,7 +17,7 @@ def levy_characteristic_function(u, alpha, beta, gamma, delta):
 
 def enforce_martingale_condition(alpha, beta, gamma, T, r):
     """
-    Enforces the martingale condition, even if assuming that prices are not independent, mostly for Arbitrage Prevention reasons.
+    Enforces the martingale condition, even if assuming that prices are not independent, mostly for Arbitrage Prevention reasons. Quiet possibly to eliminate a free option. 
     """
     # For the martingale condition, we need phi(-i) = exp(r*T)
     def condition(delta):
@@ -34,66 +34,35 @@ def enforce_martingale_condition(alpha, beta, gamma, T, r):
     
     return delta_solution[0][0]
 
-def levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=10000):
-    """
-    Calculate the risk-neutral expectation that an OTM option becomes ITM under Lévy-alpha model.
-    This calculates E[1_{S_T > K}] for a call option using Fourier inversion.
+def levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=2000, U_max=50):
+    # Enforce martingale condition to get correct delta
+    delta = enforce_martingale_condition(alpha, beta, gamma, T, r)
     
-    Parameters:
-    S0 : float - Current spot price
-    K : float - Strike price
-    T : float - Time to maturity (years)
-    r : float - Risk-free rate
-    q : float - Dividend yield
-    alpha, beta, gamma : float - Lévy distribution parameters
-    n_points : int - Number of integration points
+    # Characteristic function of log-price s_T = ln(S_T)
+    def log_price_char_func(u):
+        mean_term = np.log(S0) + (r - q) * T
+        return np.exp(1j * u * mean_term) * levy_characteristic_function(u, alpha, beta, gamma, delta)
     
-    Returns:
-    float: Risk-neutral expectation E[1_{S_T > K}]
-    """
-    # ===== 1. ENFORCE MARTINGALE CONDITION =====
-    def characteristic_at_neg_i(delta_test):
-        return levy_characteristic_function(-1j, alpha, beta, gamma, delta_test)
-    
-    def equation_to_solve(delta_val):
-        char_value = characteristic_at_neg_i(delta_val)
-        return np.real(char_value) - np.exp(r * T)
-    
-    if alpha == 2:
-        delta_initial_guess = (r - 0.5 * gamma**2) * T
-    else:
-        delta_initial_guess = r * T
-    
-    delta_solution = fsolve(equation_to_solve, delta_initial_guess)[0]
-    
-    # ===== 2. CHARACTERISTIC FUNCTION OF LOG-PRICE =====
-    def log_price_characteristic_function(v):
-        phase = 1j * v * (np.log(S0) + (r - q) * T)
-        return np.exp(phase) * levy_characteristic_function(v, alpha, beta, gamma, delta_solution)
-    
-    # ===== 3. CALCULATE EXPECTATION USING FOURIER INVERSION =====
-    # Expectation E[1_{S_T > K}] = P(S_T > K) under risk-neutral measure
+    # Fourier inversion for probability P(S_T > K)
     k = np.log(K / S0)  # log-moneyness
     
-    def expectation_integrand(u):
-        """Integrand for expectation calculation using Fourier inversion"""
-        if u == 0:
-            return 0.5  # Handle the singularity at u=0
-        char_func_val = log_price_characteristic_function(u)
-        numerator = np.exp(-1j * u * k) * char_func_val
-        return np.imag(numerator / (1j * u))
+    def integrand(u):
+        if np.abs(u) < 1e-10:  # Handle singularity at u=0
+            return 0.5
+        char_val = log_price_char_func(u)
+        return np.imag(np.exp(-1j * u * k) * char_val / (1j * u))
     
-    # Create integration grid (avoid u=0)
-    u_min, u_max = 1e-10, 1000
-    u_values = np.linspace(u_min, u_max, n_points)
+    # Numerical integration
+    u_values = np.linspace(1e-6, U_max, n_points)  # Avoid u=0
+    integrand_values = [integrand(u) for u in u_values]
     
-    # Evaluate integrand
-    integrand_values = np.array([expectation_integrand(u) for u in u_values])
+    # Calculate probability using trapezoidal rule
+    probability = 0.5 - (1/np.pi) * np.trapezoid(integrand_values, u_values)
     
-    # Calculate expectation using trapezoidal integration
-    expectation = 0.5 - (1/np.pi) * np.trapezoid(integrand_values, u_values)
+    # Ensure probability is valid
+    probability = np.clip(probability, 0.0, 1.0)
     
-    return expectation
+    return probability
 
 def levy_call_price(S0, K, T, r, q, alpha, beta, gamma, U_max=100, n_points=5000):
     """
@@ -208,7 +177,19 @@ def quantile_estimation(returns):
 
 
 
-# ===== EXAMPLE USAGE =====
+        # Where
+# S0: Current spot price of the underlying asset
+# K: Strike price of the option contract
+# T: Time to expiration (in years)
+# r: Risk-free interest rate (annualized)
+# q: Continuous dividend yield (annualized)
+# alpha: Tail index (0 < α ≤ 2) - lower values = fatter tails
+# beta: Skewness parameter (-1 ≤ β ≤ 1) - negative = left skew, positive = right skew
+# gamma: Scale parameter (γ > 0) - similar to volatility, controls distribution width
+# n_points: Number of integration points for numerical computation
+# U_max: Maximum integration range for Fourier transform
+
+# Main usage
 if __name__ == "__main__":
 
     # Option parameters
@@ -222,14 +203,12 @@ if __name__ == "__main__":
     data = yf.download(ticker, period="50y", interval="1d")
     prices = data['Close']
     returns = np.log(prices / prices.shift(1)).dropna().values 
-    mle_params = quantile_estimation(returns)
     quantile_params = quantile_estimation(returns)
 
-    print("MLE Estimates:", mle_params)
     print("Quantile Estimates:", quantile_params) 
 
     # Levy stable distribution parameters
-    alpha, beta, gamma = mle_params['alpha'], mle_params['beta'], mle_params['gamma']
+    alpha, beta, gamma = quantile_params['alpha'], quantile_params['beta'], quantile_params['gamma']
 
     
     print("Lévy Alpha Model - OTM to ITM Expectation:")
@@ -279,14 +258,3 @@ if __name__ == "__main__":
         expectation_val = levy_otm_to_itm_expectation(S0, strike, T, r, q, alpha, beta, gamma, n_points=5000)
         print(f"{strike}\t{moneyness}\t\t{expectation_val:.6f}")
 
-        # Where
-# S0: Current spot price of the underlying asset
-# K: Strike price of the option contract
-# T: Time to expiration (in years)
-# r: Risk-free interest rate (annualized)
-# q: Continuous dividend yield (annualized)
-# alpha: Tail index (0 < α ≤ 2) - lower values = fatter tails
-# beta: Skewness parameter (-1 ≤ β ≤ 1) - negative = left skew, positive = right skew
-# gamma: Scale parameter (γ > 0) - similar to volatility, controls distribution width
-# n_points: Number of integration points for numerical computation
-# U_max: Maximum integration range for Fourier transform
