@@ -1,43 +1,69 @@
 import numpy as np
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, minimize
 import yfinance as yf
-from scipy.stats import scoreatpercentile
-from scipy.stats import norm
+from scipy.stats import norm, scoreatpercentile, levy_stable
+import matplotlib.pyplot as plt
+
+
+def calibrate_gamma_from_volatility(alpha, beta, target_volatility, T=1.0, n_samples=100000):
+# For alpha=2, we have a direct relationship: variance = 2 * gamma^2
+    if alpha == 2.0:
+        return target_volatility / np.sqrt(2 * 252)  # Daily scale for 252 trading days
+    
+    # For alpha < 2, we need to calibrate numerically
+    def volatility_error(gamma):
+        # Generate stable returns
+        returns = levy_stable.rvs(alpha, beta, scale=gamma, size=n_samples)
+        
+        # Calculate annualized volatility from samples
+        sample_volatility = np.std(returns) * np.sqrt(252)
+        return abs(sample_volatility - target_volatility)
+    
+    # Initial guess based on empirical relationships
+    initial_gamma = target_volatility / (10 * np.sqrt(252))  # Conservative guess
+    
+    result = minimize(volatility_error, initial_gamma, method='Nelder-Mead', 
+                     options={'maxiter': 50, 'xatol': 1e-6})
+    
+    if not result.success:
+        print(f"Warning: Gamma calibration failed for α={alpha}, using fallback")
+        return initial_gamma
+    
+    return result.x[0]
 
 def levy_characteristic_function(u, alpha, beta, gamma, delta):
     """
     Should be more accurate.
-    """
+        """
+    abs_u = np.maximum(np.abs(u), 1e-12)
     if alpha == 1.0:
-        term = -gamma * np.abs(u) * (1 + 1j * beta * (2/np.pi) * np.sign(u) * np.log(np.abs(u)))
-        return np.exp(1j * delta * u + term)
+        # Cauchy-like case
+        term = -gamma * abs_u * (1 + 1j * beta * (2/np.pi) * np.sign(u) * np.log(abs_u))
     else:
-        term = - (gamma * np.abs(u)) ** alpha * (1 - 1j * beta * np.sign(u) * np.tan(np.pi * alpha / 2))
-        return np.exp(1j * delta * u + term)
+        # General case (0 < α < 2)
+        term = -np.power(gamma * abs_u, alpha) * (1 - 1j * beta * np.sign(u) * np.tan(np.pi * alpha / 2))
+    
+    return np.exp(1j * delta * u + term)
 
-
-def enforce_martingale_condition(alpha, beta, gamma, T, r):
+def martingale_condition(alpha, beta, gamma, T, r):
     """
     Enforces the martingale condition, even if assuming that prices are not independent, mostly for Arbitrage Prevention reasons. Quiet possibly to eliminate a free option. 
     """
-    # For the martingale condition, we need phi(-i) = exp(r*T)
-    def condition(delta):
-        char_value = levy_characteristic_function(-1j, alpha, beta, gamma, delta)
-        return np.real(char_value) - np.exp(r * T)
-    
-    # Solve for delta
-    delta_guess = r * T  # Reasonable initial guess
-    delta_solution = fsolve(condition, delta_guess, full_output=True)
-    
-    if delta_solution[2] != 1:  # Check if solution converged
-        print(f"Warning: Martingale condition solver did not converge. Using fallback.")
-        return r * T - 0.5 * gamma**2 * T  # Fallback to normal approximation
-    
-    return delta_solution[0][0]
+    if alpha == 2.0:
+        # Normal case: delta = (r - 0.5*sigma^2)*T
+        # But remember: for alpha=2, variance = 2*gamma^2
+        variance = 2 * gamma**2
+        return (r - 0.5 * variance) * T
+    elif alpha == 1.0:
+        # Cauchy case: special handling
+        return r * T - (2/np.pi) * gamma * beta * T
+    else:
+        # General stable case
+        return r * T - gamma**alpha * (1 / np.cos(np.pi * alpha / 2)) * np.tan(np.pi * alpha / 2) * beta * T
 
 def levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=2000, U_max=50):
     # Enforce martingale condition to get correct delta
-    delta = enforce_martingale_condition(alpha, beta, gamma, T, r)
+    delta = martingale_condition(alpha, beta, gamma, T, r)
     
     # Characteristic function of log-price s_T = ln(S_T)
     def log_price_char_func(u):
@@ -64,6 +90,39 @@ def levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=200
     probability = np.clip(probability, 0.0, 1.0)
     
     return probability
+
+# Another sanity check
+def analytical_black_scholes_probability(S0, K, T, r, q, sigma):
+    """Analytical probability for normal distribution (alpha=2)"""
+    d2 = (np.log(S0/K) + (r - q - 0.5*sigma**2)*T) / (sigma * np.sqrt(T))
+    return norm.cdf(d2)
+
+def levy_expectation(S0, K, T, r, q, alpha, beta, annual_volatility, n_samples=100000):
+    """
+    CORRECT implementation with proper volatility calibration.
+    Returns both the probability and the calibrated gamma.
+    """
+    # Step 1: Calibrate gamma to match the target annual volatility
+    gamma = calibrate_gamma_from_volatility(alpha, beta, annual_volatility, T, n_samples//10)
+    
+    # Step 2: Get proper delta for martingale condition
+    delta = martingale_condition(alpha, beta, gamma, T, r)
+    
+    # Step 3: Generate terminal prices
+    if alpha == 2.0:
+        # Normal distribution
+        X = np.random.normal(delta, gamma * np.sqrt(2), n_samples)
+    else:
+        # Lévy stable distribution
+        X = levy_stable.rvs(alpha, beta, loc=delta, scale=gamma, size=n_samples)
+    
+    # Calculate terminal price (accounting for dividends)
+    S_T = S0 * np.exp((r - q) * T + X)
+    
+    # Calculate probability
+    probability = np.mean(S_T > K)
+    
+    return probability, gamma
 
 def levy_call_price(S0, K, T, r, q, alpha, beta, gamma, U_max=100, n_points=5000):
     """
@@ -177,58 +236,96 @@ def quantile_estimation(returns):
     }
 
 ## Debug cases
-def test_with_normal_case():
-    """Test that Lévy with alpha=2 gives reasonable results (should approximate normal)."""
-    print("Testing with alpha=2 (should approximate normal distribution):")
-    
-    S0, K, T, r, q = 100.0, 105.0, 1.0, 0.05, 0.02
-    alpha, beta, gamma = 2.0, 0.0, 0.2  # Normal distribution case
-    
-    expectation = levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma)
-    
-    # Compare with analytical normal probability
-    d2 = (np.log(S0/K) + (r - q - 0.5*gamma**2)*T) / (gamma * np.sqrt(T))
-    normal_prob = norm.cdf(d2)
-    
-    print(f"Lévy Expectation (α=2): {expectation:.6f}")
-    print(f"Normal Distribution: {normal_prob:.6f}")
-    print(f"Difference: {abs(expectation - normal_prob):.6f}")
-    print()
-
-def test_with_fat_tails():
-    """Test with fat-tailed distribution."""
-    print("Testing with fat-tailed distribution (α=1.7):")
-    
-    S0, K, T, r, q = 100.0, 105.0, 1.0, 0.05, 0.02
-    alpha, beta, gamma = 1.7, -0.3, 0.2  # Fat-tailed case
-    
-    expectation = levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma)
-    
-    print(f"Lévy Expectation (α=1.7): {expectation:.6f}")
-    print(f"Interpretation: {expectation:.2%} probability of OTM call becoming ITM")
-    print()
-
-def sensitivity_analysis():
-    """Analyze how expectation changes with different parameters."""
-    print("Sensitivity Analysis:")
-    print("K\tα\tβ\tE[1_{S_T > K}]")
-    print("-" * 40)
+def run_corrected_tests():
+    """Run tests with proper volatility calibration"""
+    print("PROPERLY CALIBRATED Lévy Expectation Implementation")
+    print("=" * 65)
     
     S0, T, r, q = 100.0, 1.0, 0.05, 0.02
-    gamma = 0.2
+    annual_volatility = 0.20  # 20% annual volatility
     
-    # Test different strikes
-    for K in [90, 100, 105, 110, 115]:
-        for alpha, beta in [(2.0, 0.0), (1.7, -0.3), (1.5, -0.4)]:
-            expectation = levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=1000)
-            print(f"{K}\t{alpha}\t{beta}\t{expectation:.6f}")
+    test_cases = [
+        # (K, alpha, beta, expected_range, description)
+        (105, 2.0, 0.0, (0.35, 0.45), "OTM Call - Normal (should match BS)"),
+        (95, 2.0, 0.0, (0.55, 0.65), "ITM Call - Normal (should match BS)"),
+        (105, 1.7, -0.3, (0.38, 0.50), "OTM Call - Fat Tails"),
+        (115, 1.7, -0.3, (0.15, 0.30), "Deep OTM - Fat Tails"),
+        (80, 1.7, -0.3, (0.85, 0.98), "Deep ITM - Fat Tails"),
+    ]
+    
+    for K, alpha, beta, expected_range, description in test_cases:
+        # Calculate expectation with proper calibration
+        result = levy_expectation(S0, K, T, r, q, alpha, beta, annual_volatility)
+        expectation, calibrated_gamma = result  # Now this should work
+        
+        # For alpha=2, compare with analytical Black-Scholes
+        if alpha == 2.0:
+            bs_prob = analytical_black_scholes_probability(S0, K, T, r, q, annual_volatility)
+            diff = abs(expectation - bs_prob)
+            print(f"{description}:")
+            print(f"  Lévy: {expectation:.6f}, BS: {bs_prob:.6f}, Diff: {diff:.6f}")
+            print(f"  Calibrated gamma: {calibrated_gamma:.6f}")
+        else:
+            bs_prob = analytical_black_scholes_probability(S0, K, T, r, q, annual_volatility)
+            diff = abs(expectation - bs_prob)
+            print(f"{description}:")
+            print(f"  Lévy: {expectation:.6f}, BS: {bs_prob:.6f}, Diff: {diff:.6f}")
+            print(f"  Calibrated gamma: {calibrated_gamma:.6f}")
+        
+        # Validate reasonableness
+        if not (0 <= expectation <= 1):
+            print(f"  ❌ ERROR: Invalid probability {expectation:.6f}")
+        elif expectation < expected_range[0] or expectation > expected_range[1]:
+            print(f"  ⚠️  SUSPICIOUS: {expectation:.6f} outside expected range {expected_range}")
+        else:
+            print(f"  ✅ REASONABLE: {expectation:.6f} in expected range {expected_range}")
+        
+        print()
 
+def simple_demonstration():
+    """Simple demonstration without the complex calibration"""
+    print("SIMPLE DEMONSTRATION")
+    print("=" * 40)
+    
+    S0, K, T, r, q = 100.0, 105.0, 1.0, 0.05, 0.02
+    annual_volatility = 0.20
+    
+    # Test normal case (alpha=2) - should match Black-Scholes
+    alpha, beta = 2.0, 0.0
+    expectation, gamma = levy_expectation(S0, K, T, r, q, alpha, beta, annual_volatility, 50000)
+    bs_prob = analytical_black_scholes_probability(S0, K, T, r, q, annual_volatility)
+    
+    print(f"Normal case (α=2):")
+    print(f"  Lévy: {expectation:.6f}")
+    print(f"  BS:   {bs_prob:.6f}")
+    print(f"  Diff: {abs(expectation - bs_prob):.6f}")
+    print(f"  Gamma: {gamma:.6f}")
+    print()
+    
+    # Test fat-tailed case
+    alpha, beta = 1.7, -0.3
+    expectation, gamma = levy_expectation(S0, K, T, r, q, alpha, beta, annual_volatility, 50000)
+    
+    print(f"Fat-tailed case (α=1.7):")
+    print(f"  Lévy: {expectation:.6f}")
+    print(f"  BS:   {bs_prob:.6f}") 
+    print(f"  Diff: {abs(expectation - bs_prob):.6f}")
+    print(f"  Gamma: {gamma:.6f}")
 
- 
-
-
-
-
+if __name__ == "__main__":
+    # Run simple demonstration first
+    simple_demonstration()
+    
+    print("\n" + "=" * 65)
+    print("Note: The calibration might take a moment for α < 2 cases...")
+    
+    # Then run the full test suite
+    try:
+        run_corrected_tests()
+    except Exception as e:
+        print(f"Error in full test suite: {e}")
+        print("Running simplified version instead...")
+        simple_demonstration()
 
 '''
 # Where
