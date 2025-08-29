@@ -5,21 +5,17 @@ from scipy.stats import scoreatpercentile
 
 def levy_characteristic_function(u, alpha, beta, gamma, delta):
     """
-    Computes the characteristic function of the Levy alpha-stable distribution
-    using the parameterization S(alpha, beta, gamma, delta; 1).
+    Should be more accurate.
     """
     if alpha == 1.0:
-        # Handle the alpha = 1 case carefully to avoid issues with log(0)
-        abs_u = np.abs(u)
-        if u == 0:
-            return 1.0 + 0j
-        else:
-            term = 1j * beta * (2/np.pi) * np.log(abs_u) * u
-            return np.exp(1j * delta * u - gamma * abs_u * (1 + term))
+        term = -gamma * np.abs(u) * (1 + 1j * beta * (2/np.pi) * np.sign(u) * np.log(np.abs(u)))
+        return np.exp(1j * delta * u + term)
     else:
-        abs_u = np.abs(u)
-        term = 1j * beta * np.sign(u) * np.tan(np.pi * alpha / 2)
-        return np.exp(1j * delta * u - (gamma * abs_u) ** alpha * (1 - term))
+        term = - (gamma * np.abs(u)) ** alpha * (1 - 1j * beta * np.sign(u) * np.tan(np.pi * alpha / 2))
+        return np.exp(1j * delta * u + term)
+
+
+
 
 def levy_otm_to_itm_expectation(S0, K, T, r, q, alpha, beta, gamma, n_points=10000):
     """
